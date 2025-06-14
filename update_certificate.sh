@@ -3,22 +3,20 @@
 # 현재 시각 출력
 echo "Script started at: $(date '+%Y-%m-%d %H:%M:%S')"
 
-# 현재 디렉토리를 workdir로 설정
-workdir="$PWD"
+# 현재 디렉토리를 workdir로 설정 (절대 경로)
+workdir="$(pwd)"
 echo "Working directory: $workdir"
-
-# 웹서버 OFF
-echo "Stopping Nginx service..."
-service nginx stop
 
 # Certbot 갱신
 echo "Renewing certificates..."
-certbot renew --non-interactive --quiet --manual-auth-hook "$workdir/godaddy-dns-update.py" --manual-cleanup-hook 'rm -f /tmp/CERTBOT_VALIDATION'
-
-# 웹서버 ON
-echo "Starting Nginx service..."
-service nginx start
+certbot certonly \
+  --manual \
+  --preferred-challenges dns \
+  --manual-auth-hook "$workdir/godaddy-dns-update.py" \
+  --manual-cleanup-hook "$workdir/godaddy-dns-cleanup.py" \
+  --non-interactive \
+  --force-renewal \
+  -d '*.cspc.me' -d cspc.me
 
 # 종료 시각 출력
 echo "Script ended at: $(date '+%Y-%m-%d %H:%M:%S')"
-

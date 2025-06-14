@@ -1,65 +1,86 @@
-#!/usr/bin/python3
-import requests
+#!/usr/bin/env python3
 import os
-import dns.resolver
+import requests
 import time
+import dns.resolver
 from dotenv import load_dotenv
 
-load_dotenv()  # take environment variables from .env
+load_dotenv()
 
-# GoDaddy API 인증 정보
-api_key = os.environ['GODADDY_API_KEY']
-api_secret = os.environ['GODADDY_API_SECRET']
+api_key = os.getenv('GODADDY_API_KEY')
+api_secret = os.getenv('GODADDY_API_SECRET')
+certbot_domain = os.getenv('CERTBOT_DOMAIN')
+validation_value = os.getenv('CERTBOT_VALIDATION')
+zone_domain = "cspc.me"
 
-print(api_key)
-# 인증서를 갱신하려는 도메인 설정
-domain = os.environ['DOMAIN']
-record_name = '_acme-challenge'
-record_type = 'TXT'
-record_data = os.environ['CERTBOT_VALIDATION']  # Certbot에서 제공하는 검증 문자열
-record_ttl = 600  # TTL 값 설정
+if not all([api_key, api_secret, certbot_domain, validation_value]):
+    print("Missing required environment variables.")
+    exit(1)
 
+def get_record_name(certbot_domain, zone_domain):
+    if certbot_domain == zone_domain:
+        return "_acme-challenge"
+    elif certbot_domain.endswith("." + zone_domain):
+        sub = certbot_domain[:-(len(zone_domain) + 1)]
+        return f"_acme-challenge.{sub}"
+    else:
+        raise ValueError("CERTBOT_DOMAIN doesn't match ZONE_DOMAIN")
 
+record_name = get_record_name(certbot_domain, zone_domain)
+fqdn = f"{record_name}.{zone_domain}"
+record_type = "TXT"
+record_ttl = 600
 
-def wait_for_dns_propagation(record_name, expected_data, timeout=1800, interval=30):
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        try:
-            answers = dns.resolver.resolve(record_name, 'TXT')
-            for rdata in answers:
-                if expected_data in rdata.to_text():
-                    return True
-        except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
-            pass
-        time.sleep(interval)
-    return False
-
-
-
-# GoDaddy API 엔드포인트
-url = f'https://api.godaddy.com/v1/domains/{domain}/records/{record_type}/{record_name}'
-
-# API 헤더 설정
+url = f"https://api.godaddy.com/v1/domains/{zone_domain}/records/{record_type}/{record_name}"
 headers = {
-    'Authorization': f'sso-key {api_key}:{api_secret}',
-    'Content-Type': 'application/json'
+    "Authorization": f"sso-key {api_key}:{api_secret}",
+    "Content-Type": "application/json"
 }
 
-# TXT 레코드 업데이트를 위한 데이터
-data = [{
-    'data': record_data,
-    'ttl': record_ttl
-}]
-
-# API 요청을 통해 DNS 레코드 업데이트
-response = requests.put(url, headers=headers, json=data)
-
-print(response.text)
-if response.status_code == 200:
-    if wait_for_dns_propagation(f'{record_name}.{domain}', record_data):
-        print("DNS record propagated.")
-    else:
-        print("Timeout: DNS record not propagated within the expected time.")
+# 1. 기존 값 조회
+existing_resp = requests.get(url, headers=headers)
+existing_values = []
+if existing_resp.status_code == 200:
+    existing_values = [r["data"] for r in existing_resp.json()]
 else:
-    print("Failed to update DNS record")
+    print("Warning: failed to read existing TXT values")
 
+# 2. 현재 값 추가
+if validation_value not in existing_values:
+    existing_values.append(validation_value)
+
+# 3. 등록
+payload = [{"data": val, "ttl": record_ttl} for val in existing_values]
+put_resp = requests.put(url, headers=headers, json=payload)
+if put_resp.status_code != 200:
+    print("Failed to update TXT record")
+    print(put_resp.text)
+    exit(1)
+
+print(f"TXT record set for {fqdn} → {validation_value}")
+print("Waiting for DNS to propagate...")
+
+# 4. 전파 확인
+resolver = dns.resolver.Resolver()
+resolver.cache = None
+resolver.nameservers = ['8.8.8.8', '1.1.1.1']
+
+MAX_WAIT = 180
+INTERVAL = 10
+elapsed = 0
+while elapsed < MAX_WAIT:
+    try:
+        answers = resolver.resolve(fqdn, 'TXT')
+        for rdata in answers:
+            txt = rdata.to_text().strip('"')
+            if txt == validation_value:
+                print(f"TXT record verified in DNS after {elapsed} seconds.")
+                exit(0)
+    except Exception:
+        pass
+    time.sleep(INTERVAL)
+    elapsed += INTERVAL
+    print(f"Still waiting... {elapsed}s")
+
+print("Timeout: DNS record not visible after propagation wait.")
+exit(1)
